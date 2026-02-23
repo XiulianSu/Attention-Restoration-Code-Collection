@@ -1,0 +1,132 @@
+// 在油猴中使用
+// ==UserScript==
+// @name         知乎首页高质量阅读器
+// @namespace    http://tampermonkey.net/
+// @version      2.0.0
+// @description  基于摘要长度、配图和真实字数的三步精准过滤，保留小盾牌优雅排版
+// @author       Joy_Su
+// @match        https://www.zhihu.com/
+// @match        https://www.zhihu.com/follow
+// @match        https://www.zhihu.com/hot
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ================= 配置区 =================
+    const FULLTEXT_MIN_SCORE = 300;  // 规则1：未折叠的完整文章，综合得分（字数+图片）低于此值屏蔽
+    const IMAGE_WEIGHT = 50;         // 1张图片的折算字数权重
+
+    const SUMMARY_MIN_LENGTH = 60;   // 规则3：被折叠且无配图的文章，摘要字数低于此值屏蔽
+    // ==========================================
+
+    /**
+     * 处理卡片的主函数
+     */
+    function filterShortAnswers() {
+        // 获取所有还没被我们处理过的推荐卡片
+        const cards = document.querySelectorAll('.Card.TopstoryItem:not([data-processed="true"])');
+
+        cards.forEach(card => {
+            // 打上标记，避免重复计算
+            card.setAttribute('data-processed', 'true');
+
+            // 提取关键特征元素
+            const readMoreBtn = card.querySelector('.ContentItem-more');     // 展开全文按钮
+            const coverImage = card.querySelector('.RichContent-cover');     // 封面图
+            const richText = card.querySelector('.RichText.ztext');          // 正文/摘要内容
+
+            if (!richText) return;
+
+            let shouldBlock = false;
+            let blockReason = '';
+
+            // 提取纯文本并剔除空格，用于计算字数
+            const textContent = richText.textContent || '';
+            const pureTextLength = textContent.replace(/\s+/g, '').length;
+
+            // ================= 核心三步走判决逻辑 =================
+
+            if (!readMoreBtn) {
+                // 【情况 1：没有阅读全文（全文已完全展示）】
+                // 此时 pureTextLength 就是文章的真实总字数
+                const imageCount = richText.querySelectorAll('figure').length;
+                const totalScore = pureTextLength + (imageCount * IMAGE_WEIGHT);
+
+                if (totalScore < FULLTEXT_MIN_SCORE) {
+                    shouldBlock = true;
+                    blockReason = `完整短文，综合算分: ${totalScore}`;
+                }
+            } else {
+                // 【情况 2：有阅读全文（长文被截断）】
+                if (coverImage) {
+                    // 有配图，大概率是优质/易读性强的长文，直接放行！
+                    shouldBlock = false;
+                } else {
+                    // 没有配图，且被截断了，需要审判它的摘要长度
+                    // 此时 pureTextLength 代表的是“摘要显示的字数”
+                    if (pureTextLength < SUMMARY_MIN_LENGTH) {
+                        shouldBlock = true;
+                        blockReason = `无图且摘要过短，仅: ${pureTextLength} 字`;
+                    }
+                }
+            }
+
+            // ================= 执行 UI 屏蔽（小盾牌） =================
+            if (shouldBlock) {
+                const innerContent = card.querySelector('.RichContent-inner');
+
+                if (innerContent) {
+                    // 隐藏原正文
+                    innerContent.style.display = 'none';
+
+                    // 隐藏可能漏网的封面图（虽然按上面的逻辑走到这里大概率没图，但求稳）
+                    if (coverImage) coverImage.style.display = 'none';
+
+                    // 优雅的小盾牌占位条
+                    const noticeBox = document.createElement('div');
+                    noticeBox.style.padding = '16px';
+                    noticeBox.style.margin = '10px 0';
+                    noticeBox.style.backgroundColor = '#f6f6f6';
+                    noticeBox.style.color = '#8590a6';
+                    noticeBox.style.borderRadius = '6px';
+                    noticeBox.style.textAlign = 'center';
+                    noticeBox.style.fontSize = '14px';
+                    noticeBox.style.fontWeight = '500';
+                    noticeBox.innerHTML = `🛡️ 此回答因篇幅过短已被过滤 (${blockReason})`;
+
+                    innerContent.parentNode.insertBefore(noticeBox, innerContent);
+                }
+            }
+        });
+    }
+
+    // 防抖函数，防止页面滚动时频繁触发计算导致卡顿
+    function debounce(func, wait) {
+        let timeout;
+        return function(...args) {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func(...args), wait);
+        };
+    }
+
+    const debouncedFilter = debounce(filterShortAnswers, 200);
+
+    // 页面刚加载时执行
+    filterShortAnswers();
+
+    // 监听页面滚动加载（处理瀑布流）
+    const observer = new MutationObserver((mutations) => {
+        let shouldProcess = false;
+        mutations.forEach(mutation => {
+            if (mutation.addedNodes.length > 0) {
+                shouldProcess = true;
+            }
+        });
+        if (shouldProcess) debouncedFilter();
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+})();
